@@ -1,0 +1,43 @@
+name: SKA Heartbeat Trigger
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Trigger SKA Heartbeat
+        run: |
+          echo "=== SKA HEARTBEAT $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+          curl -sL --max-time 45 -X POST \
+            "https://sales-king-academy.saleskingacademy.workers.dev/api/heartbeat/trigger" \
+            -H "Content-Type: application/json" \
+            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            -H "X-Founder-Email: saleskingacademy@gmail.com" \
+            -o /tmp/hb.json || echo "Heartbeat request failed"
+          cat /tmp/hb.json 2>/dev/null | head -c 500 || echo "No response"
+          echo ""
+
+      - name: Trigger Social Cycle
+        run: |
+          curl -sL --max-time 45 -X POST \
+            "https://sales-king-academy.saleskingacademy.workers.dev/api/social/trigger" \
+            -H "Content-Type: application/json" \
+            -H "X-Founder-Email: saleskingacademy@gmail.com" \
+            -o /tmp/social.json || echo "Social request failed"
+          cat /tmp/social.json 2>/dev/null | head -c 300 || echo "No response"
+          echo ""
+
+      - name: Trigger TASI Full Cycle (offloaded from Cloudflare cron v25.16)
+        run: |
+          curl -sL --max-time 60 -X POST \
+            "https://sales-king-academy.saleskingacademy.workers.dev/api/tasi/cycle" \
+            -H "Content-Type: application/json" \
+            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            -o /tmp/tasi.json || echo "TASI request failed"
+          cat /tmp/tasi.json 2>/dev/null | head -c 300 || echo "No response"
+          echo ""
