@@ -1,0 +1,87 @@
+name: SKA Search Compute (L2 — Quantum-Inspired 26-Lane Explorer)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 10 min; runner has full CPU vs edge worker budget
+  workflow_dispatch:
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 26-lane quantum-inspired search (runner-side, zero Cloudflare CPU)
+        run: |
+          cat > /tmp/search.mjs <<'JS'
+          // SKA GitHub-L2 Search Plane. 26 lanes = 25 alpha-weighted offsets + 1 main balancer.
+          // Quantum-INSPIRED (classical): each centisecond tick holds 25 candidate "amplitudes",
+          // iterates 25 refinement passes, and collapses to the surviving twin-prime findings.
+          // alpha=25 balancing. Runs FAR harder than the edge worker (full runner CPU).
+          import fs from "fs";
+          const GENESIS_MS = 1530403200000;
+          const ALPHA = 25, LANES = 26, ITER_PER_CENTI = 25;
+
+          function modpow(b,e,m){let r=1n;b%=m;while(e>0n){if(e&1n)r=r*b%m;e>>=1n;b=b*b%m;}return r;}
+          function isPrime(n){if(n<2n)return false;for(const p of [2n,3n,5n,7n,11n,13n,17n,19n,23n,29n,31n,37n]){if(n%p===0n)return n===p;}let d=n-1n,r=0n;while(d%2n===0n){d/=2n;r++;}for(const a of [2n,3n,5n,7n,11n,13n,17n,19n,23n,29n,31n,37n]){let x=modpow(a,d,n);if(x===1n||x===n-1n)continue;let c=false;for(let i=0n;i<r-1n;i++){x=x*x%n;if(x===n-1n){c=true;break;}}if(!c)return false;}return true;}
+
+          // resume cursor shipped in from prior state (env), else default base
+          let base = 100000000001n;
+          try { const prior = JSON.parse(process.env.PRIOR_CURSOR || "null"); if (prior && prior.cursor) base = BigInt(prior.cursor); } catch(e){}
+
+          const t0 = Date.now();
+          const laneResults = [];
+          let grandTotal = 0;
+          const BUDGET_MS = 90 * 1000; // 90s of runner compute (was 5min) - GitHub Actions free tier is 2000min/mo; lanes+iterations UNCHANGED
+
+          for (let lane = 0; lane < LANES; lane++) {
+            const isMain = lane === 0;
+            // alpha-weighted offset so lanes never re-cover the same region (self-feeding handoff)
+            let n = base + BigInt(lane) * BigInt(ALPHA) * 1000000n;
+            if (n % 2n === 0n) n += 1n;
+            let hits = 0, checked = 0;
+            const found = [];
+            // quantum-inspired: process in centisecond "ticks", 25 iterations each, amplitude = survival
+            while (Date.now() - t0 < (BUDGET_MS * (lane+1) / LANES)) {
+              for (let iter = 0; iter < ITER_PER_CENTI; iter++) {
+                // each iteration advances a candidate; "amplitude" = passes primality both sides
+                if (isMain) {
+                  // main balancer: reverse-engineer structure (center divisible by 30)
+                  if (isPrime(n) && isPrime(n+2n) && ((n+1n) % 30n === 0n)) { hits++; if (found.length<5) found.push("STRUCT:"+n.toString()); }
+                } else {
+                  if (isPrime(n) && isPrime(n+2n)) { hits++; if (found.length<5) found.push(n.toString()+","+(n+2n).toString()); }
+                }
+                n += 2n; checked++;
+              }
+            }
+            grandTotal += hits;
+            laneResults.push({ lane, role: isMain ? "main_balancer" : "offset_"+lane, checked, hits, sample: found, next_cursor: n.toString() });
+          }
+
+          const payload = {
+            key: "search:github_l2_26lane",
+            value: {
+              engine: "QUANTUM_INSPIRED_26LANE",
+              alpha: ALPHA, lanes: LANES, iter_per_centisecond: ITER_PER_CENTI,
+              total_hits_this_run: grandTotal,
+              runtime_ms: Date.now() - t0,
+              lanes_detail: laneResults.map(l => ({ lane: l.lane, role: l.role, checked: l.checked, hits: l.hits, sample: l.sample })),
+              next_base: laneResults[1] ? laneResults[1].next_cursor : base.toString(),
+              ranAt: new Date().toISOString()
+            },
+            ttl: 604800
+          };
+          console.log("26-lane run complete:", grandTotal, "twin primes in", Date.now()-t0, "ms across", LANES, "lanes");
+          fs.writeFileSync("/tmp/payload.json", JSON.stringify(payload));
+          JS
+          PRIOR_CURSOR="$(curl -s https://sales-king-academy.saleskingacademy.workers.dev/api/mledger/state | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const l1=(j.state||[]).find(x=>x.lane===1);console.log(JSON.stringify({cursor:l1?l1.cursor:null}))}catch(e){console.log("null")}})')" \
+          node /tmp/search.mjs
+
+      - name: Ship findings back to worker (state/write)
+        run: |
+          curl -s -X POST https://sales-king-academy.saleskingacademy.workers.dev/api/state/write \
+            -H "Content-Type: application/json" \
+            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            -H "User-Agent: SKA-GitHub-Compute-L2/1.0" \
+            --data @/tmp/payload.json \
+            | head -c 300
+          echo "  [shipped to worker]"
