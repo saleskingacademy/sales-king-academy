@@ -1,0 +1,148 @@
+name: Precompute Answers
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'How many answers to precompute this run'
+        default: '40'
+  schedule:
+    - cron: '23 */4 * * *'
+jobs:
+  pre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          TEMPORAL_DB_ID: ${{ secrets.TEMPORAL_DB_ID }}
+          COUNT_IN: ${{ github.event.inputs.count }}
+        run: |
+          cat > p.js << 'JSEOF'
+          // v29.9 - PRECOMPUTE DRAWS FROM THE CURRICULUM, THEN ASKS ITSELF.
+          //
+          // The previous version worked from 30 hardcoded seed questions plus
+          // recent user queries. Every seed was already cached in both modes and
+          // there are almost no users yet, so each run skipped all 60, wrote
+          // nothing, and exited success. It was not broken - it was FINISHED, and
+          // a finished work list looks identical to a dead one from outside.
+          //
+          // Three sources now, in order:
+          //   1 REAL user queries not yet cached (unchanged - demand first)
+          //   2 CURRICULUM questions drawn from 1,120 subjects and 3,397 lessons
+          //   3 HYPOTHESIS questions the system generates for itself by
+          //     cross-engineering two randomly drawn subjects from different
+          //     programmes, and reverse-engineering a lesson back to the question
+          //     it answers
+          //
+          // Source 2 alone is months of real work. Source 3 never runs out,
+          // because the pair draw is combinatorial.
+          const ACCT=process.env.CF_ACCOUNT_ID, CF=process.env.CF_API_TOKEN, DB=process.env.TEMPORAL_DB_ID;
+          // v30.0: model calls use a token minted specifically with Workers AI
+          // scope. CF_API_TOKEN carries D1 access but its AI scope was never
+          // verified, and ai() swallowing an auth error into an empty string is
+          // indistinguishable from a finished work list - which is exactly how
+          // this went unnoticed for days.
+          const AITOK=process.env.CF_AI_TOKEN || CF;
+          const COUNT=parseInt(process.env.COUNT_IN||'40');
+          const MODEL='@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+          async function d1(sql, params){
+            const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCT}/d1/database/${DB}/query`,
+              {method:'POST',headers:{'Authorization':`Bearer ${CF}`,'Content-Type':'application/json'},
+               body:JSON.stringify(params?{sql,params}:{sql})});
+            return r.json();
+          }
+          async function ai(messages, maxTok, temp){
+            const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCT}/ai/run/${MODEL}`,
+              {method:'POST',headers:{'Authorization':`Bearer ${AITOK}`,'Content-Type':'application/json'},
+               body:JSON.stringify({messages,max_tokens:maxTok||800,temperature:temp===undefined?0.4:temp})});
+            const j=await r.json();
+            if(!j?.success){ console.log('  AI ERROR:', JSON.stringify(j?.errors||j).substring(0,180)); }
+            return j?.result?.response || '';
+          }
+          function imul(a,b){ return Math.imul(a,b); }
+          function norm(q){ return String(q||'').toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,' ').trim().substring(0,200); }
+          function ckey(agentId,q,mode){
+            const n=norm(q); let h=0;
+            for(let i=0;i<n.length;i++){ h=(imul(h,31)+n.charCodeAt(i))>>>0; }
+            const m = mode==='det'?'d' : (mode==='nl'?'n':'a');
+            return 'ac_'+m+'_'+agentId+'_'+h.toString(36);
+          }
+
+          (async()=>{
+            await d1("CREATE TABLE IF NOT EXISTS answer_cache (qkey TEXT PRIMARY KEY, agent_id INTEGER, query_norm TEXT, answer TEXT, source TEXT, dna16 TEXT, time_counter TEXT, anchor32 TEXT, mode16 TEXT, hits INTEGER DEFAULT 0, created_at TEXT, last_hit TEXT)");
+
+            let queries=[], srcTag={};
+            function add(q, tag){ q=String(q||'').trim(); if(q.length>12 && !queries.includes(q)){ queries.push(q); srcTag[q]=tag; } }
+
+            // 1) REAL DEMAND FIRST - what users actually asked
+            try{
+              const r=await d1("SELECT DISTINCT query FROM lane_memory WHERE query IS NOT NULL AND LENGTH(query)>12 ORDER BY id DESC LIMIT 120");
+              (r?.result?.[0]?.results||[]).forEach(x=>add(x.query,'USER_QUERY'));
+            }catch(e){}
+            console.log(`real user queries: ${queries.length}`);
+
+            // 2) THE CURRICULUM - months of genuine work, and these get hit when
+            //    students arrive because they are the questions the material answers
+            try{
+              const r=await d1("SELECT key FROM ska_knowledge WHERE LENGTH(data)>=6000 AND key NOT LIKE 'sat_index_%' ORDER BY RANDOM() LIMIT 40");
+              (r?.result?.[0]?.results||[]).forEach(x=>{
+                const s=String(x.key).replace(/_/g,' ');
+                add(`what are the core principles of ${s}`,'CURRICULUM');
+                add(`how do I apply ${s} in practice`,'CURRICULUM');
+                add(`what mistakes do people make with ${s}`,'CURRICULUM');
+              });
+            }catch(e){}
+
+            // 3) REVERSE-ENGINEER a lesson back to the question it answers
+            try{
+              const r=await d1("SELECT title, substr(content,1,700) AS gist FROM ska_curriculum WHERE LENGTH(content)>=3000 ORDER BY RANDOM() LIMIT 6");
+              for(const row of (r?.result?.[0]?.results||[])){
+                const out=await ai([{role:'user',content:
+                  `Here is teaching material:\n\n${row.gist}\n\nWrite the 2 questions a learner would ask that this material answers. One question per line, no numbering, no preamble.`}], 160, 0.5);
+                out.split('\n').map(s=>s.replace(/^[-*\d.\s]+/,'').trim()).filter(s=>s.length>14).slice(0,2).forEach(qq=>add(qq,'REVERSE_ENG'));
+              }
+            }catch(e){ console.log('  reverse-eng skipped:', String(e).substring(0,80)); }
+
+            // 4) CROSS-ENGINEER two subjects from different areas into a hypothesis
+            try{
+              const r=await d1("SELECT key FROM ska_knowledge WHERE LENGTH(data)>=6000 AND key NOT LIKE 'sat_index_%' ORDER BY RANDOM() LIMIT 12");
+              const keys=(r?.result?.[0]?.results||[]).map(x=>String(x.key).replace(/_/g,' '));
+              for(let i=0;i+1<keys.length && i<8; i+=2){
+                const out=await ai([{role:'user',content:
+                  `Two fields: "${keys[i]}" and "${keys[i+1]}".\n\nWrite 2 questions that could only be asked by someone who knows BOTH - where a method from one might transfer to the other. Specific and technical. One per line, no numbering, no preamble. If the two have no meaningful connection, output nothing at all.`}], 180, 0.65);
+                out.split('\n').map(s=>s.replace(/^[-*\d.\s]+/,'').trim()).filter(s=>s.length>18).slice(0,2).forEach(qq=>add(qq,'CROSS_ENG'));
+              }
+            }catch(e){ console.log('  cross-eng skipped:', String(e).substring(0,80)); }
+
+            console.log(`work list: ${queries.length} questions`);
+            const byTag={}; Object.values(srcTag).forEach(t=>byTag[t]=(byTag[t]||0)+1);
+            console.log('  by source:', JSON.stringify(byTag));
+
+            let made=0, skipped=0, empty=0;
+            for(const q of queries){
+              if(made>=COUNT) break;
+              for(const mode of ['auto','nl']){
+                if(made>=COUNT) break;
+                const k=ckey(0,q,mode);
+                const ex=await d1("SELECT qkey FROM answer_cache WHERE qkey=? LIMIT 1",[k]);
+                if((ex?.result?.[0]?.results||[]).length){ skipped++; continue; }
+                const sys='You are an expert advisor. Answer thoroughly and practically with concrete, actionable detail. Use clear structure. No preamble. If the question rests on a false premise, say so first.';
+                let ans='';
+                try{ ans=await ai([{role:'system',content:sys},{role:'user',content:q}], 800); }catch(e){}
+                if(!ans || ans.length<200){ empty++; continue; }
+                await d1("INSERT OR IGNORE INTO answer_cache (qkey,agent_id,query_norm,answer,source,dna16,time_counter,anchor32,mode16,hits,created_at) VALUES (?,?,?,?,?,?,?,?,?,0,datetime('now'))",
+                  [k,0,norm(q),ans,'PRECOMPUTE_'+(srcTag[q]||'SEED'),'0701201812000001',String(Math.floor(Date.now()/1000)),'',''+mode]);
+                made++;
+                console.log(`  cached [${mode}] (${srcTag[q]}) ${q.substring(0,54)} (${ans.length}c)`);
+                await new Promise(r=>setTimeout(r,300));
+              }
+            }
+            const tot=await d1("SELECT COUNT(*) n FROM answer_cache");
+            console.log(`\nDONE: ${made} new, ${skipped} already cached, ${empty} empty answers`);
+            console.log(`answer_cache total: ${tot?.result?.[0]?.results?.[0]?.n}`);
+          })();
+          JSEOF
+          node p.js
