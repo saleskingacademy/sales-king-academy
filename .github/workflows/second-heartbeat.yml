@@ -1,0 +1,40 @@
+name: SKA Second Heartbeat (Python)
+
+# Cloudflare cron floor is 1 minute. This runs a 1-second beat from an
+# Actions runner instead. Chain jobs back-to-back for continuous coverage.
+#
+# MINUTES WARNING: a 5.5h job is 330 minutes. Four per day is 1,320/day,
+# ~39,600/month, against 2,000/month on a PRIVATE repo. This is only
+# sustainable on a public repo, where Actions minutes are unlimited.
+# Left on workflow_dispatch until that split happens.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tick_seconds:
+        description: 'Seconds between beats'
+        required: false
+        default: '1'
+      run_minutes:
+        description: 'Minutes to run (max 330, under the 6h job cap)'
+        required: false
+        default: '330'
+      budget:
+        description: 'Max requests this run'
+        required: false
+        default: '60000'
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run second-level heartbeat
+        env:
+          SKA_WORKER_URL: https://sales-king-academy.saleskingacademy.workers.dev
+          SKA_HEARTBEAT_KEY: ${{ secrets.SKA_HEARTBEAT_KEY }}
+          TICK_SECONDS: ${{ github.event.inputs.tick_seconds || '1' }}
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '330' }}
+          DAILY_REQUEST_BUDGET: ${{ github.event.inputs.budget || '60000' }}
+        run: python3 tools/heartbeat_loop.py
