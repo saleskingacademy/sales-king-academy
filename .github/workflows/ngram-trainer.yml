@@ -1,0 +1,71 @@
+name: SKA NGram Weighter (Own Next-Word Model from Knowledge Base)
+
+on:
+  schedule:
+    - cron: '25 */6 * * *'   # retrain 4x daily as the knowledge base grows
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Train n-gram next-word weights on the knowledge base (pure math, no LLM)
+        run: |
+          cat > /tmp/train.mjs <<'JS'
+          import fs from "fs";
+          // Pull the knowledge corpus from the worker, build trigram next-word weights.
+          // This is YOUR OWN next-word weighting model - counted from your stored text.
+          const BASE = "https://sales-king-academy.saleskingacademy.workers.dev";
+
+          async function getCorpus() {
+            try {
+              const r = await fetch(BASE + "/api/knowledge/corpus", { headers: { "X-Heartbeat-Key": "ska-heartbeat-2018" } });
+              if (!r.ok) return "";
+              const d = await r.json();
+              return (d.corpus || []).join("\\n");
+            } catch { return ""; }
+          }
+
+          const text = await getCorpus();
+          const words = (text.toLowerCase().match(/[a-z']+/g)) || [];
+          // trigram: (w1,w2) -> {next: count}
+          const tri = {};
+          for (let i = 0; i < words.length - 2; i++) {
+            const k = words[i] + " " + words[i+1];
+            (tri[k] = tri[k] || {});
+            tri[k][words[i+2]] = (tri[k][words[i+2]] || 0) + 1;
+          }
+          // keep only top-3 next-words per context to bound size
+          const model = {};
+          let contexts = 0;
+          for (const k in tri) {
+            const sorted = Object.entries(tri[k]).sort((a,b)=>b[1]-a[1]).slice(0,3);
+            model[k] = sorted;
+            contexts++;
+          }
+          const payload = {
+            key: "search:ngram_weighter",
+            value: {
+              engine: "OWN_NGRAM_NEXTWORD",
+              contexts_learned: contexts,
+              vocab_size: new Set(words).size,
+              corpus_words: words.length,
+              model_full: model,
+              trainedAt: new Date().toISOString(),
+              note: "Next-word weights counted from own knowledge base. Deterministic, no LLM."
+            },
+            ttl: 604800
+          };
+          console.log("ngram trained:", contexts, "contexts,", new Set(words).size, "vocab,", words.length, "words");
+          fs.writeFileSync("/tmp/ngram.json", JSON.stringify(payload));
+          JS
+          node /tmp/train.mjs
+
+      - name: Store the trained weights back to the worker
+        run: |
+          curl -s --max-time 30 -X POST "https://sales-king-academy.saleskingacademy.workers.dev/api/state/write" \
+            -H "Content-Type: application/json" \
+            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            --data @/tmp/ngram.json | head -c 200
+          echo "  [ngram weights stored]"
