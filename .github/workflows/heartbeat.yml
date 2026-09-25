@@ -16,7 +16,7 @@ jobs:
           curl -sL --max-time 45 -X POST \
             "https://sales-king-academy.saleskingacademy.workers.dev/api/heartbeat/trigger" \
             -H "Content-Type: application/json" \
-            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            -H "X-Heartbeat-Key: ${{ secrets.SKA_HEARTBEAT_KEY }}" \
             -H "X-Founder-Email: saleskingacademy@gmail.com" \
             -o /tmp/hb.json || echo "Heartbeat request failed"
           cat /tmp/hb.json 2>/dev/null | head -c 500 || echo "No response"
@@ -37,7 +37,7 @@ jobs:
           curl -sL --max-time 60 -X POST \
             "https://sales-king-academy.saleskingacademy.workers.dev/api/tasi/cycle" \
             -H "Content-Type: application/json" \
-            -H "X-Heartbeat-Key: ska-heartbeat-2018" \
+            -H "X-Heartbeat-Key: ${{ secrets.SKA_HEARTBEAT_KEY }}" \
             -o /tmp/tasi.json || echo "TASI request failed"
           cat /tmp/tasi.json 2>/dev/null | head -c 300 || echo "No response"
           echo ""

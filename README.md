@@ -14,9 +14,14 @@ July and again of August, then resurrected on the 1st.
 
 ## What lives here
 
-- Scheduled compute: compute plane, search, knowledge accelerator, precompute
-- Model work: tokenizer training, n-gram weighting, self-teach
-- Heartbeat: second-level Python beat driver (Cloudflare's floor is 60s)
+- `heartbeat.yml` - every 4h: fires heartbeat, social and TASI cycles on the platform
+- `second-heartbeat.yml` - manual: second-level Python beat driver (Cloudflare's floor is 60s);
+  the future per-beat trigger for the SAT pyramid
+- Machine key: `secrets.SKA_HEARTBEAT_KEY` only. Never type a key into a file here - this repo is public.
+
+Removed 2026-09-25 (recoverable from git history): compute, search-compute and
+ngram-trainer wrote state nothing on the platform reads; knowledge-accelerator,
+self-teach and precompute had no secrets here and ran as no-ops.
 
 ## What does NOT live here
 
