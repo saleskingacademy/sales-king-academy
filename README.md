@@ -15,8 +15,8 @@ July and again of August, then resurrected on the 1st.
 ## What lives here
 
 - `heartbeat.yml` - every 4h: fires heartbeat, social and TASI cycles on the platform
-- `second-heartbeat.yml` - manual: second-level Python beat driver (Cloudflare's floor is 60s);
-  the future per-beat trigger for the SAT pyramid
+- `second-heartbeat.yml` - every 5h, chained: beat fan-out driver (tools/beat_fanout.py). 1 beat = 1 s;
+  the platform cascade schedules workflows onto 26 lanes, lanes due on a beat fire together.
 - Machine key: `secrets.SKA_HEARTBEAT_KEY` only. Never type a key into a file here - this repo is public.
 
 Removed 2026-09-25 (recoverable from git history): compute, search-compute and

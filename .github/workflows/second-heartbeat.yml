@@ -1,40 +1,37 @@
-name: SKA Second Heartbeat (Python)
+name: SKA Beat Fan-out
 
-# Cloudflare cron floor is 1 minute. This runs a 1-second beat from an
-# Actions runner instead. Chain jobs back-to-back for continuous coverage.
-#
-# MINUTES WARNING: a 5.5h job is 330 minutes. Four per day is 1,320/day,
-# ~39,600/month, against 2,000/month on a PRIVATE repo. This is only
-# sustainable on a public repo, where Actions minutes are unlimited.
-# Left on workflow_dispatch until that split happens.
-
+# 1 second = 1 beat. The platform's cascade schedules the work; this job keeps
+# the beat and fires every lane due on a beat at the same instant, each on its
+# own Cloudflare isolate. Idle beats send nothing. Public repo: Actions minutes
+# are unlimited, so jobs chain back-to-back (concurrency queues the next one).
 on:
+  schedule:
+    - cron: '0 */5 * * *'
   workflow_dispatch:
     inputs:
-      tick_seconds:
-        description: 'Seconds between beats'
-        required: false
-        default: '1'
       run_minutes:
-        description: 'Minutes to run (max 330, under the 6h job cap)'
+        description: 'Minutes to run (max 330)'
         required: false
-        default: '330'
+        default: '300'
       budget:
         description: 'Max requests this run'
         required: false
-        default: '60000'
+        default: '8000'
+
+concurrency:
+  group: beat-fanout
+  cancel-in-progress: false
 
 jobs:
-  heartbeat:
+  fanout:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v4
-      - name: Run second-level heartbeat
+      - name: Run beat fan-out
         env:
-          SKA_WORKER_URL: https://sales-king-academy.saleskingacademy.workers.dev
+          SKA_WORKER_URL: https://saleskingacademy.com
           SKA_HEARTBEAT_KEY: ${{ secrets.SKA_HEARTBEAT_KEY }}
-          TICK_SECONDS: ${{ github.event.inputs.tick_seconds || '1' }}
-          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '330' }}
-          DAILY_REQUEST_BUDGET: ${{ github.event.inputs.budget || '60000' }}
-        run: python3 tools/heartbeat_loop.py
+          RUN_MINUTES: ${{ github.event.inputs.run_minutes || '300' }}
+          DAILY_REQUEST_BUDGET: ${{ github.event.inputs.budget || '8000' }}
+        run: python3 tools/beat_fanout.py
