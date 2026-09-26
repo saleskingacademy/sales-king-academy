@@ -26,6 +26,16 @@ def beat_now():
     return int(time.time()) - GENESIS
 
 def call(method, path, body=None, timeout=60):
+    # Free-plan cold isolates answer 503 (Cloudflare 1102); the next request lands
+    # warm. One quick retry. Safe for lanes: a workflow is claimed atomically on
+    # the platform, so a retry can never run it twice.
+    st, d = _call(method, path, body, timeout)
+    if st in (0, 502, 503, 504, 520, 522, 524):
+        time.sleep(0.4)
+        st, d = _call(method, path, body, timeout)
+    return st, d
+
+def _call(method, path, body=None, timeout=60):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method)
     req.add_header("X-Heartbeat-Key", KEY)
